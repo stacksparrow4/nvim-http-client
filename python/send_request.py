@@ -25,9 +25,16 @@ import sys
 TIMEOUT = 15
 RECV_SIZE = 65536
 
+# Keys recognized inside the `---` delimited header block.
+VALID_HEADER_KEYS = ("host", "port", "protocol", "sni")
+
 
 def parse_input(data):
-    """Split the document into (header dict, raw request string)."""
+    """Split the document into (header dict, raw request string).
+
+    Raises ValueError if the `---` header block contains malformed or
+    unrecognized entries.
+    """
     header = {}
     lines = data.split("\n")
     idx = 0
@@ -35,14 +42,40 @@ def parse_input(data):
     # Optional `---` delimited header block.
     if lines and lines[0].strip() == "---":
         idx = 1
+        closed = False
         while idx < len(lines):
             line = lines[idx]
+            lineno = idx + 1
             idx += 1
             if line.strip() == "---":
+                closed = True
                 break
-            if ":" in line:
-                key, value = line.split(":", 1)
-                header[key.strip().lower()] = value.strip()
+            if line.strip() == "":
+                continue
+            if ":" not in line:
+                raise ValueError(
+                    "invalid header entry on line %d: %r "
+                    "(expected 'key: value')" % (lineno, line)
+                )
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            if not key:
+                raise ValueError(
+                    "invalid header entry on line %d: %r "
+                    "(missing key)" % (lineno, line)
+                )
+            if key not in VALID_HEADER_KEYS:
+                raise ValueError(
+                    "unknown header key %r on line %d (valid keys: %s)"
+                    % (key, lineno, ", ".join(VALID_HEADER_KEYS))
+                )
+            if key in header:
+                raise ValueError(
+                    "duplicate header key %r on line %d" % (key, lineno)
+                )
+            header[key] = value.strip()
+        if not closed:
+            raise ValueError("header block not closed with '---'")
 
     request = "\n".join(lines[idx:])
     return header, request
@@ -79,7 +112,12 @@ def resolve_target(header, request):
         host = host.strip("[]")  # tolerate bracketed IPv6
 
     if "port" in header:
-        port = int(header["port"])
+        try:
+            port = int(header["port"])
+        except ValueError:
+            raise ValueError("port must be an integer, got %r" % header["port"])
+        if not 0 < port < 65536:
+            raise ValueError("port must be between 1 and 65535, got %d" % port)
     else:
         port = 443 if protocol == "https" else 80
 
@@ -169,7 +207,11 @@ def recv_all(sock):
 
 def main():
     data = sys.stdin.read()
-    header, request = parse_input(data)
+    try:
+        header, request = parse_input(data)
+    except ValueError as exc:
+        sys.stderr.write("%s\n" % exc)
+        return 1
 
     if not request.strip():
         sys.stderr.write("empty request\n")
