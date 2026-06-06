@@ -19,9 +19,11 @@ document is treated as a raw HTTP request which is sent over a (optionally
 TLS-wrapped) socket. The raw HTTP response is written to stdout.
 """
 
+import gzip
 import socket
 import ssl
 import sys
+import zlib
 
 TIMEOUT = 15
 RECV_SIZE = 65536
@@ -294,6 +296,148 @@ def recv_all(sock, method=""):
     return headers_raw + body
 
 
+def split_response(response):
+    """Split a raw response into (headers_raw, header_lines, body).
+
+    Returns (None, None, None) if no header terminator is present.
+    """
+    sep = response.find(b"\r\n\r\n")
+    if sep == -1:
+        return None, None, None
+    headers_raw = response[: sep + 4]
+    body = response[sep + 4 :]
+    # The status line is kept verbatim; only the header fields follow it.
+    lines = headers_raw.decode("iso-8859-1").split("\r\n")
+    return headers_raw, lines, body
+
+
+def dechunk(body):
+    """Decode a chunked transfer-encoded body. Best effort on truncation."""
+    result = b""
+    while True:
+        idx = body.find(b"\r\n")
+        if idx == -1:
+            break
+        # Chunk size, ignoring any chunk extensions after ';'.
+        size_field = body[:idx].split(b";", 1)[0].strip()
+        try:
+            size = int(size_field, 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        start = idx + 2
+        result += body[start : start + size]
+        body = body[start + size :]
+        # Skip the CRLF that terminates the chunk data.
+        if body[:2] == b"\r\n":
+            body = body[2:]
+    return result
+
+
+def decompress(body, encoding):
+    """Decompress a body for a single content-coding token.
+
+    Returns (decoded_bytes, ok). When the coding is unsupported or fails,
+    the original bytes are returned with ok=False.
+    """
+    encoding = encoding.strip().lower()
+    if encoding in ("", "identity"):
+        return body, True
+    try:
+        if encoding == "gzip" or encoding == "x-gzip":
+            return gzip.decompress(body), True
+        if encoding == "deflate":
+            try:
+                return zlib.decompress(body), True
+            except zlib.error:
+                # Some servers send raw deflate without the zlib header.
+                return zlib.decompress(body, -zlib.MAX_WBITS), True
+        if encoding == "br":
+            try:
+                import brotli
+            except ImportError:
+                return body, False
+            return brotli.decompress(body), True
+        if encoding == "zstd":
+            try:
+                from compression import zstd  # Python 3.14+
+                return zstd.decompress(body), True
+            except ImportError:
+                pass
+            try:
+                import zstandard
+            except ImportError:
+                return body, False
+            return zstandard.ZstdDecompressor().decompress(body), True
+    except Exception:
+        return body, False
+    return body, False
+
+
+def decode_response(response):
+    """Decode the body per Transfer-Encoding and Content-Encoding headers.
+
+    Rebuilds the header block, dropping the now-inapplicable
+    Transfer-Encoding/Content-Encoding fields and refreshing Content-Length
+    when the body was fully decoded.
+    """
+    headers_raw, lines, body = split_response(response)
+    if lines is None:
+        return response
+
+    status_line = lines[0]
+    fields = []
+    transfer_encoding = ""
+    content_encoding = ""
+    for line in lines[1:]:
+        if line == "":
+            continue
+        if ":" not in line:
+            fields.append((None, line))
+            continue
+        key, value = line.split(":", 1)
+        name = key.strip().lower()
+        if name == "transfer-encoding":
+            transfer_encoding = value.strip().lower()
+            continue
+        if name == "content-encoding":
+            content_encoding = value.strip().lower()
+            continue
+        if name == "content-length":
+            # Recomputed after decoding; drop the stale value.
+            continue
+        fields.append((name, line))
+
+    fully_decoded = True
+
+    # Transfer-Encoding is applied first (outermost), per RFC 7230.
+    codings = [c.strip() for c in transfer_encoding.split(",") if c.strip()]
+    for coding in reversed(codings):
+        if coding == "chunked":
+            body = dechunk(body)
+        elif coding == "identity":
+            continue
+        else:
+            body, ok = decompress(body, coding)
+            fully_decoded = fully_decoded and ok
+
+    # Then Content-Encoding (may be a comma-separated list, applied in order).
+    for coding in reversed(
+        [c.strip() for c in content_encoding.split(",") if c.strip()]
+    ):
+        body, ok = decompress(body, coding)
+        fully_decoded = fully_decoded and ok
+
+    out_lines = [status_line]
+    for _name, line in fields:
+        out_lines.append(line)
+    if fully_decoded:
+        out_lines.append("Content-Length: %d" % len(body))
+    new_headers = ("\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
+    return new_headers + body
+
+
 def main():
     data = sys.stdin.read()
     try:
@@ -328,6 +472,8 @@ def main():
                 sock.close()
             except OSError:
                 pass
+
+    response = decode_response(response)
 
     sys.stdout.buffer.write(response)
     sys.stdout.flush()
