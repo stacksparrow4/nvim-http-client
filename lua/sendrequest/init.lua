@@ -12,7 +12,10 @@ local function python_helper()
 end
 
 M.config = {
-  python = "python3",
+  -- Command used to run the (self-contained uv) Python helper. The helper
+  -- declares its own dependencies inline (PEP 723), which `uv run` installs
+  -- into an ephemeral environment on first use.
+  runner = { "uv", "run" },
   -- How to open the response buffer: "vsplit", "split" or "tab".
   open = "vsplit",
 }
@@ -208,7 +211,9 @@ function M.send_request()
     return
   end
 
-  local result = vim.fn.system({ M.config.python, helper }, content)
+  local cmd = vim.deepcopy(M.config.runner)
+  table.insert(cmd, helper)
+  local result = vim.fn.system(cmd, content)
 
   if vim.v.shell_error ~= 0 then
     vim.notify("SendRequest failed:\n" .. result, vim.log.levels.ERROR)

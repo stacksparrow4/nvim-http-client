@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "requests",
+#     "brotli",
+#     "zstandard",
+# ]
+# ///
 """Helper for the SendRequest Neovim command.
 
 Reads a "req" document on stdin of the form:
@@ -15,21 +23,36 @@ Reads a "req" document on stdin of the form:
     ...
 
 The leading `---` delimited header is optional. The remainder of the
-document is treated as a raw HTTP request which is sent over a (optionally
-TLS-wrapped) socket. The raw HTTP response is written to stdout.
+document is treated as a raw HTTP request which is sent with `requests`.
+The raw HTTP response is written to stdout, with the body fully decoded
+(content/transfer encodings such as gzip, deflate, br and zstd are
+transparently decompressed by urllib3, given the dependencies declared in
+the inline script metadata above).
+
+This file is a self-contained uv script: the dependencies in the `/// script`
+block are installed automatically when run via `uv run`.
 """
 
-import gzip
-import socket
-import ssl
 import sys
-import zlib
+
+import requests
+import urllib3
+
+# Permissive TLS (self-signed / mismatched certs) means urllib3 would
+# otherwise emit InsecureRequestWarning noise on stderr.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 15
-RECV_SIZE = 65536
 
 # Keys recognized inside the `---` delimited header block.
 VALID_HEADER_KEYS = ("host", "port", "protocol", "sni", "proxy")
+
+# Response headers that no longer describe the decoded body we emit.
+_DROPPED_RESPONSE_HEADERS = (
+    "content-encoding",
+    "transfer-encoding",
+    "content-length",
+)
 
 
 def parse_input(data):
@@ -84,28 +107,56 @@ def parse_input(data):
     return header, request
 
 
-def get_host_header(request):
-    """Return the value of the HTTP `Host` header, if present."""
-    for line in request.split("\n"):
+def parse_http_request(request):
+    """Parse a raw HTTP request into (method, target, headers, body).
+
+    `headers` is a list of (name, value) pairs preserving order. `target` is
+    the request-target from the request line (path + query).
+    """
+    text = request.replace("\r\n", "\n").replace("\r", "\n").lstrip("\n")
+    if "\n\n" in text:
+        head, body = text.split("\n\n", 1)
+    else:
+        head, body = text, ""
+
+    head_lines = head.split("\n")
+    request_line = head_lines[0].strip()
+    parts = request_line.split()
+    if not parts:
+        raise ValueError("missing request line")
+    method = parts[0].upper()
+    target = parts[1] if len(parts) > 1 else "/"
+
+    headers = []
+    for line in head_lines[1:]:
         if line.strip() == "":
-            # End of the request line / header block.
-            break
-        if ":" in line:
-            key, value = line.split(":", 1)
-            if key.strip().lower() == "host":
-                return value.strip()
+            continue
+        if ":" not in line:
+            raise ValueError("invalid request header line: %r" % line)
+        key, value = line.split(":", 1)
+        headers.append((key.strip(), value.strip()))
+
+    return method, target, headers, body
+
+
+def get_header(headers, name):
+    """Case-insensitive lookup in a list of (name, value) header pairs."""
+    name = name.lower()
+    for key, value in headers:
+        if key.lower() == name:
+            return value
     return None
 
 
-def resolve_target(header, request):
-    """Compute (host, port, protocol, sni) using header values and defaults."""
+def resolve_target(header, request_headers):
+    """Compute (host, port, protocol, sni, proxies) from header + defaults."""
     protocol = header.get("protocol", "https").lower()
     if protocol not in ("http", "https"):
         raise ValueError("protocol must be 'http' or 'https', got %r" % protocol)
 
     host = header.get("host")
     if not host:
-        host_header = get_host_header(request)
+        host_header = get_header(request_headers, "host")
         if not host_header:
             raise ValueError(
                 "no host found: set 'host' in the header or a 'Host:' request header"
@@ -125,15 +176,14 @@ def resolve_target(header, request):
         port = 443 if protocol == "https" else 80
 
     sni = header.get("sni", host) if protocol == "https" else None
-    proxy = parse_proxy(header.get("proxy"))
-    return host, port, protocol, sni, proxy
+    proxies = parse_proxy(header.get("proxy"))
+    return host, port, protocol, sni, proxies
 
 
 def parse_proxy(value):
-    """Parse a proxy URL into (host, port).
+    """Parse a proxy URL into a `requests` proxies dict, or None.
 
     Accepts forms like ``http://localhost:8080`` or ``localhost:8080``.
-    Returns None when no proxy is configured.
     """
     if not value:
         return None
@@ -159,283 +209,87 @@ def parse_proxy(value):
         raise ValueError("proxy must include a host")
     if not 0 < proxy_port < 65536:
         raise ValueError("proxy port must be between 1 and 65535, got %d" % proxy_port)
-    return proxy_host, proxy_port
+    proxy_url = "http://%s:%d" % (proxy_host, proxy_port)
+    return {"http": proxy_url, "https": proxy_url}
 
 
-def build_request_bytes(request):
-    """Normalize line endings and ensure a terminating blank line."""
-    raw = request.replace("\r\n", "\n").replace("\r", "\n")
-    raw = raw.lstrip("\n")
-    raw = raw.rstrip("\n") + "\n\n"
-    return raw.replace("\n", "\r\n").encode("utf-8")
+class _SNIAdapter(requests.adapters.HTTPAdapter):
+    """HTTPAdapter that pins the TLS SNI to an explicit server hostname.
 
-
-def proxy_connect(sock, host, port):
-    """Establish a tunnel to host:port through an HTTP proxy via CONNECT."""
-    target = "%s:%d" % (host, port)
-    request = (
-        "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (target, target)
-    ).encode("ascii")
-    sock.sendall(request)
-
-    buf = b""
-    while b"\r\n\r\n" not in buf:
-        chunk = sock.recv(RECV_SIZE)
-        if not chunk:
-            break
-        buf += chunk
-
-    status_line = buf.split(b"\r\n", 1)[0].decode("iso-8859-1")
-    parts = status_line.split(" ", 2)
-    if len(parts) < 2 or parts[1] != "200":
-        raise socket.error("proxy CONNECT failed: %s" % status_line)
-
-
-def connect(host, port, protocol, sni, proxy=None):
-    if proxy is not None:
-        sock = socket.create_connection(proxy, timeout=TIMEOUT)
-        proxy_connect(sock, host, port)
-    else:
-        sock = socket.create_connection((host, port), timeout=TIMEOUT)
-    if protocol == "https":
-        ctx = ssl.create_default_context()
-        # Be permissive so self-signed / mismatched certs still work.
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        sock = ctx.wrap_socket(sock, server_hostname=sni)
-    return sock
-
-
-def get_request_method(request):
-    """Return the HTTP method from the request line, upper-cased."""
-    for line in request.replace("\r\n", "\n").split("\n"):
-        if line.strip():
-            return line.split(" ", 1)[0].strip().upper()
-    return ""
-
-
-def get_status_code(headers_raw):
-    """Return the integer status code from the response status line, or None."""
-    status_line = headers_raw.split(b"\r\n", 1)[0].decode("iso-8859-1")
-    parts = status_line.split(" ", 2)
-    if len(parts) >= 2:
-        try:
-            return int(parts[1])
-        except ValueError:
-            return None
-    return None
-
-
-def recv_all(sock, method=""):
-    """Read a complete HTTP response (best effort)."""
-    sock.settimeout(TIMEOUT)
-    buf = b""
-
-    # Read at least the response headers.
-    while b"\r\n\r\n" not in buf:
-        try:
-            chunk = sock.recv(RECV_SIZE)
-        except socket.timeout:
-            return buf
-        if not chunk:
-            return buf
-        buf += chunk
-
-    header_end = buf.index(b"\r\n\r\n") + 4
-    headers_raw = buf[:header_end]
-    body = buf[header_end:]
-
-    headers = {}
-    for line in headers_raw.decode("iso-8859-1").split("\r\n")[1:]:
-        if ":" in line:
-            key, value = line.split(":", 1)
-            headers[key.strip().lower()] = value.strip()
-
-    # Per RFC 7230 these responses never carry a message body, regardless of
-    # any Content-Length/Transfer-Encoding header. Returning early avoids
-    # blocking on a kept-alive connection that will never send more bytes.
-    status = get_status_code(headers_raw)
-    if method.upper() == "HEAD" or status in (204, 304) or (
-        status is not None and 100 <= status < 200
-    ):
-        return headers_raw + body
-
-    transfer_encoding = headers.get("transfer-encoding", "").lower()
-
-    def read_more():
-        try:
-            chunk = sock.recv(RECV_SIZE)
-        except socket.timeout:
-            return None
-        return chunk or None
-
-    if "chunked" in transfer_encoding:
-        while not body.endswith(b"0\r\n\r\n") and b"0\r\n\r\n" not in body:
-            chunk = read_more()
-            if chunk is None:
-                break
-            body += chunk
-    elif "content-length" in headers:
-        try:
-            length = int(headers["content-length"])
-        except ValueError:
-            length = 0
-        while len(body) < length:
-            chunk = read_more()
-            if chunk is None:
-                break
-            body += chunk
-    else:
-        # No length information: read until the connection closes.
-        while True:
-            chunk = read_more()
-            if chunk is None:
-                break
-            body += chunk
-
-    return headers_raw + body
-
-
-def split_response(response):
-    """Split a raw response into (headers_raw, header_lines, body).
-
-    Returns (None, None, None) if no header terminator is present.
+    This lets the connection target (URL host) differ from the name sent in
+    the TLS ClientHello, mirroring the original `sni` header support.
     """
-    sep = response.find(b"\r\n\r\n")
-    if sep == -1:
-        return None, None, None
-    headers_raw = response[: sep + 4]
-    body = response[sep + 4 :]
-    # The status line is kept verbatim; only the header fields follow it.
-    lines = headers_raw.decode("iso-8859-1").split("\r\n")
-    return headers_raw, lines, body
+
+    def __init__(self, server_hostname, *args, **kwargs):
+        self._server_hostname = server_hostname
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["server_hostname"] = self._server_hostname
+        super().init_poolmanager(*args, **kwargs)
 
 
-def dechunk(body):
-    """Decode a chunked transfer-encoded body. Best effort on truncation."""
-    result = b""
-    while True:
-        idx = body.find(b"\r\n")
-        if idx == -1:
-            break
-        # Chunk size, ignoring any chunk extensions after ';'.
-        size_field = body[:idx].split(b";", 1)[0].strip()
-        try:
-            size = int(size_field, 16)
-        except ValueError:
-            break
-        if size == 0:
-            break
-        start = idx + 2
-        result += body[start : start + size]
-        body = body[start + size :]
-        # Skip the CRLF that terminates the chunk data.
-        if body[:2] == b"\r\n":
-            body = body[2:]
-    return result
+def build_session(host, protocol, sni):
+    """Create a session, mounting an SNI-overriding adapter when needed."""
+    session = requests.Session()
+    # Don't let environment proxies / netrc surprise the user; we pass proxies
+    # explicitly per request.
+    session.trust_env = False
+    if protocol == "https" and sni and sni != host:
+        session.mount("https://", _SNIAdapter(sni))
+    return session
 
 
-def decompress(body, encoding):
-    """Decompress a body for a single content-coding token.
+def send(header, request):
+    """Send the parsed request via `requests` and return the Response."""
+    method, target, req_headers, body = parse_http_request(request)
+    host, port, protocol, sni, proxies = resolve_target(header, req_headers)
 
-    Returns (decoded_bytes, ok). When the coding is unsupported or fails,
-    the original bytes are returned with ok=False.
-    """
-    encoding = encoding.strip().lower()
-    if encoding in ("", "identity"):
-        return body, True
-    try:
-        if encoding == "gzip" or encoding == "x-gzip":
-            return gzip.decompress(body), True
-        if encoding == "deflate":
-            try:
-                return zlib.decompress(body), True
-            except zlib.error:
-                # Some servers send raw deflate without the zlib header.
-                return zlib.decompress(body, -zlib.MAX_WBITS), True
-        if encoding == "br":
-            try:
-                import brotli
-            except ImportError:
-                return body, False
-            return brotli.decompress(body), True
-        if encoding == "zstd":
-            try:
-                from compression import zstd  # Python 3.14+
-                return zstd.decompress(body), True
-            except ImportError:
-                pass
-            try:
-                import zstandard
-            except ImportError:
-                return body, False
-            return zstandard.ZstdDecompressor().decompress(body), True
-    except Exception:
-        return body, False
-    return body, False
+    url = "%s://%s:%d%s" % (protocol, host, port, target)
+
+    # `requests` manages these itself; passing them through causes conflicts.
+    headers = {
+        k: v
+        for (k, v) in req_headers
+        if k.lower() not in ("content-length",)
+    }
+
+    data = body.encode("utf-8") if body.strip() else None
+
+    session = build_session(host, protocol, sni)
+    return session.request(
+        method,
+        url,
+        headers=headers,
+        data=data,
+        proxies=proxies,
+        verify=False,
+        allow_redirects=False,
+        timeout=TIMEOUT,
+    )
 
 
-def decode_response(response):
-    """Decode the body per Transfer-Encoding and Content-Encoding headers.
+def format_response(resp):
+    """Reconstruct a raw HTTP response with a fully-decoded body."""
+    version = {10: "1.0", 11: "1.1"}.get(getattr(resp.raw, "version", 11), "1.1")
+    reason = resp.reason or ""
+    status_line = "HTTP/%s %d %s" % (version, resp.status_code, reason)
 
-    Rebuilds the header block, dropping the now-inapplicable
-    Transfer-Encoding/Content-Encoding fields and refreshing Content-Length
-    when the body was fully decoded.
-    """
-    headers_raw, lines, body = split_response(response)
-    if lines is None:
-        return response
-
-    status_line = lines[0]
-    fields = []
-    transfer_encoding = ""
-    content_encoding = ""
-    for line in lines[1:]:
-        if line == "":
+    out_lines = [status_line.rstrip()]
+    # Use the raw urllib3 header dict so duplicate headers (e.g. Set-Cookie)
+    # are preserved rather than comma-folded.
+    raw_headers = getattr(resp.raw, "headers", None) or resp.headers
+    for key, value in raw_headers.items():
+        if key.lower() in _DROPPED_RESPONSE_HEADERS:
             continue
-        if ":" not in line:
-            fields.append((None, line))
-            continue
-        key, value = line.split(":", 1)
-        name = key.strip().lower()
-        if name == "transfer-encoding":
-            transfer_encoding = value.strip().lower()
-            continue
-        if name == "content-encoding":
-            content_encoding = value.strip().lower()
-            continue
-        if name == "content-length":
-            # Recomputed after decoding; drop the stale value.
-            continue
-        fields.append((name, line))
+        out_lines.append("%s: %s" % (key, value))
 
-    fully_decoded = True
+    # `resp.content` is the decoded body; advertise its real length.
+    body = resp.content
+    out_lines.append("Content-Length: %d" % len(body))
 
-    # Transfer-Encoding is applied first (outermost), per RFC 7230.
-    codings = [c.strip() for c in transfer_encoding.split(",") if c.strip()]
-    for coding in reversed(codings):
-        if coding == "chunked":
-            body = dechunk(body)
-        elif coding == "identity":
-            continue
-        else:
-            body, ok = decompress(body, coding)
-            fully_decoded = fully_decoded and ok
-
-    # Then Content-Encoding (may be a comma-separated list, applied in order).
-    for coding in reversed(
-        [c.strip() for c in content_encoding.split(",") if c.strip()]
-    ):
-        body, ok = decompress(body, coding)
-        fully_decoded = fully_decoded and ok
-
-    out_lines = [status_line]
-    for _name, line in fields:
-        out_lines.append(line)
-    if fully_decoded:
-        out_lines.append("Content-Length: %d" % len(body))
-    new_headers = ("\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
-    return new_headers + body
+    blob = ("\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
+    return blob + body
 
 
 def main():
@@ -451,31 +305,15 @@ def main():
         return 1
 
     try:
-        host, port, protocol, sni, proxy = resolve_target(header, request)
+        resp = send(header, request)
     except ValueError as exc:
         sys.stderr.write("%s\n" % exc)
         return 1
-
-    payload = build_request_bytes(request)
-
-    sock = None
-    try:
-        sock = connect(host, port, protocol, sni, proxy)
-        sock.sendall(payload)
-        response = recv_all(sock, get_request_method(request))
-    except (socket.error, ssl.SSLError) as exc:
+    except requests.exceptions.RequestException as exc:
         sys.stderr.write("connection error: %s\n" % exc)
         return 1
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
 
-    response = decode_response(response)
-
-    sys.stdout.buffer.write(response)
+    sys.stdout.buffer.write(format_response(resp))
     sys.stdout.flush()
     return 0
 
