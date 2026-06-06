@@ -75,13 +75,20 @@ panes open *below* the target (split downwards):
 
 The captured region cannot be retargeted without running `:Convert` again,
 which tears down the previous session and starts a fresh one. The output pane
-regenerates on startup, on workflow save, and after write-back. Saving the
-output pane (`:w`) pipes it through the *saved* encode pipeline and replaces
-the region with the result (the extmark tracks the new text). Workflow edits
-only take effect once the workflow pane is saved. Closing any pane tears the
-whole session down. Pipelines run via `bash -c` (resolved from `PATH`); the
-panes are `acwrite` scratch buffers whose saves are intercepted with
-`BufWriteCmd`.
+regenerates on startup and after write-back. Saving the output pane (`:w`)
+pipes it through the *saved* encode pipeline and replaces the region with the
+result (the extmark tracks the new text).
+
+Saving the workflow pane (`:w`) acts on which line changed relative to the
+previously applied pipelines:
+
+* encode line changed only -> re-encode (decoded pane -> main pane)
+* decode line changed only -> re-decode (main pane -> decoded pane)
+* both changed             -> do nothing (ambiguous direction)
+
+Closing any pane tears the whole session down. Pipelines run via `bash -c`
+(resolved from `PATH`); the panes are `acwrite` scratch buffers whose saves
+are intercepted with `BufWriteCmd`.
 
 ## Testing
 

@@ -179,12 +179,28 @@ end
 -- Workflow save
 -- ---------------------------------------------------------------------------
 
--- Re-read the encode/decode pipelines from the workflow pane and re-decode.
+-- Re-read the encode/decode pipelines from the workflow pane and act on what
+-- changed relative to the previously applied pipelines:
+--   * encode changed only -> re-encode (decoded pane -> main pane)
+--   * decode changed only -> re-decode (main pane -> decoded pane)
+--   * both changed         -> do nothing (ambiguous direction)
 local function on_workflow_save(session)
   local lines = vim.api.nvim_buf_get_lines(session.workflow_buf, 0, -1, false)
-  session.applied = { encode = lines[1] or "", decode = lines[2] or "" }
+  local new_encode = lines[1] or ""
+  local new_decode = lines[2] or ""
   vim.bo[session.workflow_buf].modified = false
-  decode_to_output(session)
+
+  local enc_changed = new_encode ~= session.applied.encode
+  local dec_changed = new_decode ~= session.applied.decode
+  session.applied = { encode = new_encode, decode = new_decode }
+
+  if enc_changed and dec_changed then
+    return -- ambiguous: do nothing
+  elseif enc_changed then
+    on_output_save(session) -- encode: decoded pane -> main pane
+  elseif dec_changed then
+    decode_to_output(session) -- decode: main pane -> decoded pane
+  end
 end
 
 -- ---------------------------------------------------------------------------
