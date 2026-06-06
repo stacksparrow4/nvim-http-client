@@ -13,18 +13,19 @@ by a `---` delimited YAML-style header block describing the connection target.
 ## Repository layout
 
 ```
-plugin/sendrequest.lua      Entry point: registers the :SendRequest command,
+plugin/nvim-http-client.lua Entry point: registers the :SendRequest command,
                             the `req` filetype (*.req, *.resp), a
                             BufWritePost autocmd to re-apply syntax, and a
                             BufReadPost autocmd to auto-open an existing
                             *.resp alongside a *.req file.
-lua/sendrequest/init.lua    Core module: M.setup/config, syntax highlighting
+lua/nvim-http-client/init.lua
+                            Core module: M.setup/config, syntax highlighting
                             (apply_syntax), request dispatch (send_request),
                             and response buffer handling.
 python/send_request.py      stdin->stdout HTTP client. Parses the `---` header,
                             opens a (optionally TLS) socket, sends the request,
                             reads the response. Stdlib only (socket, ssl, sys).
-syntax/req.vim              Syntax loader; defers to require("sendrequest").apply_syntax().
+syntax/req.vim              Syntax loader; defers to require("nvim-http-client").apply_syntax().
 ```
 
 ## How it works (data flow)

@@ -1,10 +1,10 @@
-if vim.g.loaded_sendrequest then
+if vim.g.loaded_nvim_http_client then
   return
 end
-vim.g.loaded_sendrequest = true
+vim.g.loaded_nvim_http_client = true
 
 vim.api.nvim_create_user_command("SendRequest", function()
-  require("sendrequest").send_request()
+  require("nvim-http-client").send_request()
 end, {
   desc = "Send the current buffer as an HTTP request and show the response",
 })
@@ -25,7 +25,7 @@ vim.api.nvim_create_autocmd("BufWritePost", {
   group = group,
   pattern = { "*.req" },
   callback = function(args)
-    require("sendrequest").apply_syntax(args.buf)
+    require("nvim-http-client").apply_syntax(args.buf)
   end,
 })
 
@@ -36,6 +36,6 @@ vim.api.nvim_create_autocmd("BufReadPost", {
   pattern = { "*.req" },
   nested = true,
   callback = function(args)
-    require("sendrequest").open_existing_response(args.buf)
+    require("nvim-http-client").open_existing_response(args.buf)
   end,
 })

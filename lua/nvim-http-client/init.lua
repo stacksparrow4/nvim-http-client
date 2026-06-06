@@ -6,7 +6,7 @@ local function script_dir()
   return source:match("(.*[/\\])") or "./"
 end
 
--- Absolute path to the Python helper (lua/sendrequest/ -> ../../python/).
+-- Absolute path to the Python helper (lua/nvim-http-client/ -> ../../python/).
 local function python_helper()
   return script_dir() .. ".." .. "/.." .. "/python/send_request.py"
 end
