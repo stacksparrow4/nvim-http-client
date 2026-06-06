@@ -153,6 +153,26 @@ local function open_response_file(path)
   vim.cmd("edit!")
 end
 
+-- When a .req file is opened, open its corresponding .resp file (if any) in a
+-- split, leaving focus on the request buffer.
+function M.open_existing_response(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local reqpath = vim.api.nvim_buf_get_name(buf)
+  if reqpath == "" or not reqpath:match("%.req$") then
+    return
+  end
+  local resppath = vim.fn.fnamemodify(reqpath, ":r") .. ".resp"
+  if vim.fn.filereadable(resppath) == 0 then
+    return
+  end
+  local reqwin = vim.fn.bufwinid(buf)
+  open_response_file(resppath)
+  -- Keep focus on the request buffer.
+  if reqwin ~= -1 then
+    vim.api.nvim_set_current_win(reqwin)
+  end
+end
+
 function M.send_request()
   local reqpath = vim.api.nvim_buf_get_name(0)
   if reqpath == "" then

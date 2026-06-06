@@ -9,11 +9,10 @@ end, {
   desc = "Send the current buffer as an HTTP request and show the response",
 })
 
--- Treat *.req (and *.http) files as HTTP request documents.
+-- Treat *.req files as HTTP request documents.
 vim.filetype.add({
   extension = {
     req = "req",
-    http = "req",
     resp = "req",
   },
 })
@@ -24,8 +23,19 @@ vim.filetype.add({
 local group = vim.api.nvim_create_augroup("SendRequestHighlight", { clear = true })
 vim.api.nvim_create_autocmd("BufWritePost", {
   group = group,
-  pattern = { "*.req", "*.http" },
+  pattern = { "*.req" },
   callback = function(args)
     require("sendrequest").apply_syntax(args.buf)
+  end,
+})
+
+-- When a *.req file is opened, automatically open its corresponding *.resp
+-- file in a split if it already exists.
+vim.api.nvim_create_autocmd("BufReadPost", {
+  group = group,
+  pattern = { "*.req" },
+  nested = true,
+  callback = function(args)
+    require("sendrequest").open_existing_response(args.buf)
   end,
 })
