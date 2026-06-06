@@ -202,6 +202,12 @@ function M.send_request()
     return
   end
 
+  -- Sanity check: only operate on .req files.
+  if not reqpath:match("%.req$") then
+    vim.notify("SendRequest: not a .req file: " .. reqpath, vim.log.levels.ERROR)
+    return
+  end
+
   local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   local content = table.concat(lines, "\n")
 
