@@ -22,6 +22,10 @@ lua/nvim-http-client/init.lua
                             Core module: M.setup/config, syntax highlighting
                             (apply_syntax), request dispatch (send_request),
                             and response buffer handling.
+lua/nvim-http-client/convert.lua
+                            :Convert feature: encode/decode of a captured
+                            selection region in two stacked scratch panes
+                            (workflow pipelines + decoded output).
 python/send_request.py      stdin->stdout HTTP client. Parses the `---` header,
                             opens a (optionally TLS) socket, sends the request,
                             reads the response. Stdlib only (socket, ssl, sys).
@@ -55,6 +59,29 @@ Host: example.com
 
 The header block is optional; if omitted, host/port are inferred from the
 `Host:` request header and the protocol (default `https`).
+
+## Convert (encode/decode) feature
+
+Select text in a `.req`/`.resp` buffer (the "target") in Visual mode and run
+`:Convert`. The selection is captured *once* into a fixed region (tracked with
+an extmark and highlighted); Visual mode is not used afterwards. Two scratch
+panes open *below* the target (split downwards):
+
+1. workflow pane - line 1 is the encode bash pipeline, line 2 the decode
+   pipeline. Auto-generated from the selection: `base64 -w 0` / `base64 -d`
+   when the selection is >= 8 bytes and decodes cleanly as base64, otherwise
+   `urlenc` / `urlenc -d`.
+2. output pane - the decoded region.
+
+The captured region cannot be retargeted without running `:Convert` again,
+which tears down the previous session and starts a fresh one. The output pane
+regenerates on startup, on workflow save, and after write-back. Saving the
+output pane (`:w`) pipes it through the *saved* encode pipeline and replaces
+the region with the result (the extmark tracks the new text). Workflow edits
+only take effect once the workflow pane is saved. Closing any pane tears the
+whole session down. Pipelines run via `bash -c` (resolved from `PATH`); the
+panes are `acwrite` scratch buffers whose saves are intercepted with
+`BufWriteCmd`.
 
 ## Testing
 

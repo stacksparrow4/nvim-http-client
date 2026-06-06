@@ -9,6 +9,16 @@ end, {
   desc = "Send the current buffer as an HTTP request and show the response",
 })
 
+-- Open the interactive encode/decode panes for the current Visual selection.
+-- Invoked from Visual mode (`:'<,'>Convert`); the selection is read from the
+-- `'<` / `'>` marks.
+vim.api.nvim_create_user_command("Convert", function()
+  require("nvim-http-client.convert").start()
+end, {
+  range = true,
+  desc = "Encode/decode the Visual selection in stacked workflow + output panes",
+})
+
 -- Treat *.req files as HTTP request documents.
 vim.filetype.add({
   extension = {
