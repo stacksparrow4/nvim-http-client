@@ -132,15 +132,34 @@ end
 -- Response buffer handling
 -- ---------------------------------------------------------------------------
 
+-- Find an existing window in the current tab that is already showing a
+-- response (*.resp) file, so we can reuse it instead of opening a new split.
+local function existing_response_win()
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    if name:match("%.resp$") then
+      return win
+    end
+  end
+  return -1
+end
+
 -- Open the response file in a window and (re)load it from disk. Reuses the
--- window already showing the file if present.
+-- window already showing the file if present, otherwise reuses any window
+-- already showing a response file, falling back to a new split.
 local function open_response_file(path)
   local escaped = vim.fn.fnameescape(path)
   local bufnr = vim.fn.bufnr(path)
   local win = (bufnr ~= -1) and vim.fn.bufwinid(bufnr) or -1
 
+  if win == -1 then
+    win = existing_response_win()
+  end
+
   if win ~= -1 then
+    -- Reuse an existing response window: focus it and load the new file.
     vim.api.nvim_set_current_win(win)
+    vim.cmd("edit " .. escaped)
   elseif M.config.open == "split" then
     vim.cmd("split " .. escaped)
   elseif M.config.open == "tab" then
