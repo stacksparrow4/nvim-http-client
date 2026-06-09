@@ -5,17 +5,20 @@
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   };
 
-  outputs = { self, nixpkgs }: {
-
-    packages.x86_64-linux.nvim-http-client = import ./default.nix {
-      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+  outputs = { nixpkgs, ... }:
+    let
+      systems = nixpkgs.lib.systems.flakeExposed;
+      forAllSystems = nixpkgs.lib.genAttrs systems;
+    in
+    {
+      packages = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        rec {
+          nvim-http-client = import ./default.nix { inherit pkgs; };
+          urlenc = import ./urlenc.nix { inherit pkgs; };
+          default = nvim-http-client;
+        });
     };
-
-    packages.x86_64-linux.urlenc = import ./urlenc.nix {
-      pkgs = nixpkgs.legacyPackages.x86_64-linux;
-    };
-    
-    packages.x86_64-linux.default = self.packages.x86_64-linux.nvim-http-client;
-
-  };
 }
