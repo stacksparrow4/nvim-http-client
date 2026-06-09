@@ -11,7 +11,7 @@
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
     };
 
-    packages.x86_64-linux.pwnproxy = import ./pwnproxy.nix {
+    packages.x86_64-linux.urlenc = import ./urlenc.nix {
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
     };
     
