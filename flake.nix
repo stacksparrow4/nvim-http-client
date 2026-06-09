@@ -5,11 +5,17 @@
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   };
 
-  outputs = { nixpkgs, ... }: {
+  outputs = { self, nixpkgs }: {
 
-    packages.x86_64-linux.default = import ./default.nix {
+    packages.x86_64-linux.nvim-http-client = import ./default.nix {
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
     };
+
+    packages.x86_64-linux.pwnproxy = import ./pwnproxy.nix {
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+    };
+    
+    packages.x86_64-linux.default = self.packages.x86_64-linux.nvim-http-client;
 
   };
 }
