@@ -14,7 +14,6 @@
 # Or via callPackage:  pkgs.callPackage ./default.nix { }
 {
   pkgs ? import <nixpkgs> { },
-  lib ? pkgs.lib,
   vimUtils ? pkgs.vimUtils,
   python3 ? pkgs.python3,
 }:
@@ -54,15 +53,4 @@ vimUtils.buildVimPlugin {
 
   # Pure Lua/Python; nothing to compile or test here.
   doCheck = false;
-
-  # Surface the interpreter for debugging / reuse.
-  passthru.pythonEnv = pythonEnv;
-
-  meta = {
-    description = "Send raw HTTP requests from a Neovim buffer and view the response";
-    homepage = "https://github.com/sprrw/nvim-http-client";
-    license = lib.licenses.mit;
-    platforms = lib.platforms.all;
-    maintainers = [ ];
-  };
 }
