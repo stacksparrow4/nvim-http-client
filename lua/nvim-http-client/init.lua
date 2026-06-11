@@ -161,8 +161,9 @@ local function open_response_file(path)
 
   if win ~= -1 then
     -- Reuse an existing response window: focus it and load the new file.
+    -- Force (edit!) so a dirty/stale response buffer is replaced cleanly.
     vim.api.nvim_set_current_win(win)
-    vim.cmd("edit " .. escaped)
+    vim.cmd("edit! " .. escaped)
   elseif M.config.open == "split" then
     vim.cmd("split " .. escaped)
   elseif M.config.open == "tab" then
