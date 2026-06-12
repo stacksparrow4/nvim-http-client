@@ -176,12 +176,12 @@ local function open_response_file(path)
   vim.cmd("edit!")
 end
 
--- Build the (hidden) response file path for a given request path:
--- <dir>/<name>.req -> <dir>/.<name>.resp
+-- Build the response file path for a given request path:
+-- <dir>/<name>.req -> <dir>/<name>.req.resp
 local function response_path_for(reqpath)
   local dir = vim.fn.fnamemodify(reqpath, ":h")
-  local name = vim.fn.fnamemodify(reqpath, ":t:r")
-  return dir .. "/." .. name .. ".resp"
+  local name = vim.fn.fnamemodify(reqpath, ":t")
+  return dir .. "/" .. name .. ".resp"
 end
 
 -- When a .req file is opened, open its corresponding .resp file (if any) in a
@@ -239,7 +239,7 @@ function M.send_request()
   result = result:gsub("\r", "")
   local out_lines = vim.split(result, "\n", { plain = true })
 
-  -- Write the response next to the request, as a hidden .resp file.
+  -- Write the response next to the request, as a <name>.req.resp file.
   local resppath = response_path_for(reqpath)
   local ok, err = pcall(vim.fn.writefile, out_lines, resppath)
   if not ok then
