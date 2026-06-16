@@ -51,6 +51,7 @@ host: example.com
 port: 443
 protocol: https
 sni: example.com
+format_json: false
 ---
 GET / HTTP/1.1
 Host: example.com
@@ -59,6 +60,10 @@ Host: example.com
 
 The header block is optional; if omitted, host/port are inferred from the
 `Host:` request header and the protocol (default `https`).
+
+The `format_json` key (default `false`) pretty-prints the response body as
+JSON before writing the response file; if the body is not valid JSON the
+body is left untouched.
 
 ## Convert (encode/decode) feature
 

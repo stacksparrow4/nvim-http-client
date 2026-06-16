@@ -17,6 +17,7 @@ Reads a "req" document on stdin of the form:
     protocol: https
     sni: example.com
     proxy: http://localhost:8080
+    format_json: false
     ---
     GET / HTTP/1.1
     Host: example.com
@@ -33,6 +34,7 @@ This file is a self-contained uv script: the dependencies in the `/// script`
 block are installed automatically when run via `uv run`.
 """
 
+import json
 import sys
 
 import requests
@@ -45,7 +47,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TIMEOUT = 15
 
 # Keys recognized inside the `---` delimited header block.
-VALID_HEADER_KEYS = ("host", "port", "protocol", "sni", "proxy")
+VALID_HEADER_KEYS = ("host", "port", "protocol", "sni", "proxy", "format_json")
 
 # Response headers that no longer describe the decoded body we emit.
 _DROPPED_RESPONSE_HEADERS = (
@@ -193,6 +195,19 @@ def resolve_target(header, request_headers):
     return host, port, protocol, sni, proxies
 
 
+def parse_bool(value):
+    """Parse a header value into a boolean.
+
+    Accepts true/false, yes/no, 1/0, on/off (case-insensitive).
+    """
+    raw = value.strip().lower()
+    if raw in ("true", "yes", "1", "on"):
+        return True
+    if raw in ("false", "no", "0", "off"):
+        return False
+    raise ValueError("expected a boolean, got %r" % value)
+
+
 def parse_proxy(value):
     """Parse a proxy URL into a `requests` proxies dict, or None.
 
@@ -282,8 +297,12 @@ def send(header, request):
     )
 
 
-def format_response(resp):
-    """Reconstruct a raw HTTP response with a fully-decoded body."""
+def format_response(resp, format_json=False):
+    """Reconstruct a raw HTTP response with a fully-decoded body.
+
+    When `format_json` is true, attempt to pretty-print the body as JSON,
+    leaving it untouched if it does not parse cleanly.
+    """
     version = {10: "1.0", 11: "1.1"}.get(getattr(resp.raw, "version", 11), "1.1")
     reason = resp.reason or ""
     status_line = "HTTP/%s %d %s" % (version, resp.status_code, reason)
@@ -299,6 +318,13 @@ def format_response(resp):
 
     # `resp.content` is the decoded body; advertise its real length.
     body = resp.content
+    if format_json:
+        try:
+            parsed = json.loads(body)
+            body = json.dumps(parsed, indent=2, ensure_ascii=False).encode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            # Leave the body as-is on any JSON/decoding error.
+            pass
     out_lines.append("Content-Length: %d" % len(body))
 
     blob = ("\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
@@ -326,7 +352,13 @@ def main():
         sys.stderr.write("connection error: %s\n" % exc)
         return 1
 
-    sys.stdout.buffer.write(format_response(resp))
+    try:
+        format_json = parse_bool(header.get("format_json", "false"))
+    except ValueError as exc:
+        sys.stderr.write("format_json: %s\n" % exc)
+        return 1
+
+    sys.stdout.buffer.write(format_response(resp, format_json=format_json))
     sys.stdout.flush()
     return 0
 
