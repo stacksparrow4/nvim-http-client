@@ -112,13 +112,26 @@ def parse_http_request(request):
 
     `headers` is a list of (name, value) pairs preserving order. `target` is
     the request-target from the request line (path + query).
+
+    The body is returned with its original line endings untouched. This
+    matters for multipart/form-data, whose boundary delimiters must be CRLF
+    (RFC 2046); rewriting them corrupts the upload.
     """
-    text = request.replace("\r\n", "\n").replace("\r", "\n").lstrip("\n")
-    if "\n\n" in text:
-        head, body = text.split("\n\n", 1)
+    text = request.lstrip("\r\n")
+
+    # Split the header block from the body at the first blank line, accepting
+    # either a CRLF or LF separator, without modifying the body bytes.
+    sep_crlf = text.find("\r\n\r\n")
+    sep_lf = text.find("\n\n")
+    if sep_crlf != -1 and (sep_lf == -1 or sep_crlf < sep_lf):
+        head, body = text[:sep_crlf], text[sep_crlf + 4:]
+    elif sep_lf != -1:
+        head, body = text[:sep_lf], text[sep_lf + 2:]
     else:
         head, body = text, ""
 
+    # Normalize only the head for parsing; the body is left verbatim.
+    head = head.replace("\r\n", "\n").replace("\r", "\n")
     head_lines = head.split("\n")
     request_line = head_lines[0].strip()
     parts = request_line.split()

@@ -217,8 +217,26 @@ function M.send_request()
     return
   end
 
-  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  local content = table.concat(lines, "\n")
+  -- Send the request exactly as it exists on disk so the body (notably
+  -- multipart/form-data, whose boundary delimiters must be CRLF) is preserved
+  -- byte-for-byte. Save first if the buffer has unsaved changes.
+  if vim.bo.modified then
+    local saved = pcall(function()
+      vim.cmd("silent keepjumps write")
+    end)
+    if not saved then
+      vim.notify("SendRequest: failed to save buffer before sending", vim.log.levels.ERROR)
+      return
+    end
+  end
+
+  local rf = io.open(reqpath, "rb")
+  if not rf then
+    vim.notify("SendRequest: cannot read " .. reqpath, vim.log.levels.ERROR)
+    return
+  end
+  local content = rf:read("*a")
+  rf:close()
 
   local helper = python_helper()
   if vim.fn.filereadable(helper) == 0 then
@@ -235,17 +253,26 @@ function M.send_request()
     return
   end
 
-  -- HTTP responses use CRLF; strip CR for clean display.
-  result = result:gsub("\r", "")
-  local out_lines = vim.split(result, "\n", { plain = true })
-
-  -- Write the response next to the request, as a <name>.req.resp file.
+  -- Preserve the response body verbatim. Only normalize CR within the header
+  -- block (HTTP headers are always CRLF) so the headers display cleanly; the
+  -- body is written exactly as received.
   local resppath = response_path_for(reqpath)
-  local ok, err = pcall(vim.fn.writefile, out_lines, resppath)
-  if not ok then
-    vim.notify("SendRequest: failed to write " .. resppath .. ": " .. tostring(err), vim.log.levels.ERROR)
+  local out
+  local sep = result:find("\r\n\r\n", 1, true)
+  if sep then
+    local head = result:sub(1, sep - 1):gsub("\r", "")
+    out = head .. "\n\n" .. result:sub(sep + 4)
+  else
+    out = result:gsub("\r", "")
+  end
+
+  local wf, werr = io.open(resppath, "wb")
+  if not wf then
+    vim.notify("SendRequest: failed to write " .. resppath .. ": " .. tostring(werr), vim.log.levels.ERROR)
     return
   end
+  wf:write(out)
+  wf:close()
 
   open_response_file(resppath)
 end
