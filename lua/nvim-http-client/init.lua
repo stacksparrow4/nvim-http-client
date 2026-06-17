@@ -204,6 +204,81 @@ function M.open_existing_response(buf)
   end
 end
 
+-- Parse the buffer of a .req document and build the request URL in the form
+-- scheme://<Host header>/<path including query>. Returns the URL or nil plus
+-- an error message.
+local function build_url(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+  local protocol
+  local idx = 1
+  -- Optional `---` front matter: scan it for an explicit protocol.
+  if lines[1] == "---" then
+    idx = 2
+    while idx <= #lines and lines[idx] ~= "---" do
+      local key, value = lines[idx]:match("^([%w_]+)%s*:%s*(.+)$")
+      if key and key:lower() == "protocol" then
+        protocol = value:gsub("%s+", ""):lower()
+      end
+      idx = idx + 1
+    end
+    idx = idx + 1 -- skip the closing `---`
+  end
+
+  -- The request line, e.g. "GET /path?q=1 HTTP/1.1".
+  local path
+  while idx <= #lines do
+    if lines[idx] ~= "" then
+      path = lines[idx]:match("^%u+%s+(%S+)%s+HTTP/%d")
+      break
+    end
+    idx = idx + 1
+  end
+  if not path then
+    return nil, "could not find the request line"
+  end
+  idx = idx + 1
+
+  -- The Host header (terminated by the blank line before the body).
+  local host
+  while idx <= #lines and lines[idx] ~= "" do
+    local value = lines[idx]:match("^[Hh][Oo][Ss][Tt]%s*:%s*(.+)$")
+    if value then
+      host = value:gsub("%s+$", "")
+      break
+    end
+    idx = idx + 1
+  end
+  if not host then
+    return nil, "no Host header found"
+  end
+
+  protocol = protocol or "https"
+  if not path:match("^/") then
+    path = "/" .. path
+  end
+
+  return protocol .. "://" .. host .. path
+end
+
+function M.copy_url()
+  local reqpath = vim.api.nvim_buf_get_name(0)
+  if not reqpath:match("%.req$") then
+    vim.notify("CopyURL: not a .req file: " .. reqpath, vim.log.levels.ERROR)
+    return
+  end
+
+  local url, err = build_url(0)
+  if not url then
+    vim.notify("CopyURL: " .. err, vim.log.levels.ERROR)
+    return
+  end
+
+  vim.fn.setreg("+", url)
+  vim.fn.setreg('"', url)
+  vim.notify("CopyURL: " .. url)
+end
+
 function M.send_request()
   local reqpath = vim.api.nvim_buf_get_name(0)
   if reqpath == "" then

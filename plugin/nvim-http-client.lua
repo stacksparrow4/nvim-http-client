@@ -9,6 +9,12 @@ end, {
   desc = "Send the current buffer as an HTTP request and show the response",
 })
 
+vim.api.nvim_create_user_command("CopyURL", function()
+  require("nvim-http-client").copy_url()
+end, {
+  desc = "Copy the URL of the request in the current .req buffer to the clipboard",
+})
+
 -- Open the interactive encode/decode panes for the current Visual selection.
 -- Invoked from Visual mode (`:'<,'>Convert`); the selection is read from the
 -- `'<` / `'>` marks.
