@@ -3,6 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "requests",
+#     "requests[socks]",
 #     "brotli",
 #     "zstandard",
 # ]
@@ -16,7 +17,7 @@ Reads a "req" document on stdin of the form:
     port: 443
     protocol: https
     sni: example.com
-    proxy: http://localhost:8080
+    proxy: http://localhost:8080   # or socks5://localhost:1080
     format_json: false
     ---
     GET / HTTP/1.1
@@ -208,19 +209,33 @@ def parse_bool(value):
     raise ValueError("expected a boolean, got %r" % value)
 
 
+# Recognized proxy schemes and their default ports.
+_PROXY_SCHEMES = {
+    "http": 8080,
+    "socks5": 1080,
+    "socks5h": 1080,
+}
+
+
 def parse_proxy(value):
     """Parse a proxy URL into a `requests` proxies dict, or None.
 
-    Accepts forms like ``http://localhost:8080`` or ``localhost:8080``.
+    Accepts forms like ``http://localhost:8080``, ``socks5://localhost:1080``
+    or ``localhost:8080`` (defaulting to the ``http`` scheme). For SOCKS5,
+    ``socks5h`` routes DNS resolution through the proxy.
     """
     if not value:
         return None
     raw = value.strip()
+    scheme = "http"
     if "://" in raw:
         scheme, raw = raw.split("://", 1)
-        scheme = scheme.lower()
-        if scheme not in ("http", ""):
-            raise ValueError("proxy scheme must be 'http', got %r" % scheme)
+        scheme = scheme.lower() or "http"
+        if scheme not in _PROXY_SCHEMES:
+            raise ValueError(
+                "proxy scheme must be one of %s, got %r"
+                % (", ".join(sorted(_PROXY_SCHEMES)), scheme)
+            )
     raw = raw.rstrip("/")
     if not raw:
         raise ValueError("proxy must include a host")
@@ -231,13 +246,13 @@ def parse_proxy(value):
         except ValueError:
             raise ValueError("proxy port must be an integer, got %r" % proxy_port)
     else:
-        proxy_host, proxy_port = raw, 8080
+        proxy_host, proxy_port = raw, _PROXY_SCHEMES[scheme]
     proxy_host = proxy_host.strip("[]")
     if not proxy_host:
         raise ValueError("proxy must include a host")
     if not 0 < proxy_port < 65536:
         raise ValueError("proxy port must be between 1 and 65535, got %d" % proxy_port)
-    proxy_url = "http://%s:%d" % (proxy_host, proxy_port)
+    proxy_url = "%s://%s:%d" % (scheme, proxy_host, proxy_port)
     return {"http": proxy_url, "https": proxy_url}
 
 

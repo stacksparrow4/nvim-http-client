@@ -22,6 +22,7 @@ let
   # Python environment with the helper's third-party dependencies.
   pythonEnv = python3.withPackages (ps: [
     ps.requests
+    ps.pysocks # SOCKS5 proxy support (requests[socks])
     ps.brotli
     ps.zstandard
   ]);
