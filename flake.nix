@@ -18,6 +18,7 @@
         rec {
           nvim-http-client = import ./default.nix { inherit pkgs; };
           urlenc = import ./urlenc.nix { inherit pkgs; };
+          send-request = import ./send-request.nix { inherit pkgs; };
           default = nvim-http-client;
         });
     };
