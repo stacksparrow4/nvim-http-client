@@ -184,6 +184,49 @@ local function response_path_for(reqpath)
   return dir .. "/" .. name .. ".resp"
 end
 
+-- Build the request file path for a given response path:
+-- <dir>/<name>.req.resp -> <dir>/<name>.req
+local function request_path_for(resppath)
+  return (resppath:gsub("%.resp$", ""))
+end
+
+-- Find an existing window in the current tab already showing a request (*.req)
+-- file, so we can reuse it instead of opening a new split.
+local function existing_request_win()
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    if name:match("%.req$") then
+      return win
+    end
+  end
+  return -1
+end
+
+-- Open the request file in a window to the left (mirroring how the response is
+-- opened to the right). Reuses the window already showing the file if present,
+-- otherwise reuses any window already showing a request file, falling back to
+-- a new split.
+local function open_request_file(path)
+  local escaped = vim.fn.fnameescape(path)
+  local bufnr = vim.fn.bufnr(path)
+  local win = (bufnr ~= -1) and vim.fn.bufwinid(bufnr) or -1
+
+  if win == -1 then
+    win = existing_request_win()
+  end
+
+  if win ~= -1 then
+    vim.api.nvim_set_current_win(win)
+    vim.cmd("edit! " .. escaped)
+  elseif M.config.open == "split" then
+    vim.cmd("leftabove split " .. escaped)
+  elseif M.config.open == "tab" then
+    vim.cmd("tabedit " .. escaped)
+  else
+    vim.cmd("leftabove vsplit " .. escaped)
+  end
+end
+
 -- When a .req file is opened, open its corresponding .resp file (if any) in a
 -- split, leaving focus on the request buffer.
 function M.open_existing_response(buf)
@@ -201,6 +244,26 @@ function M.open_existing_response(buf)
   -- Keep focus on the request buffer.
   if reqwin ~= -1 then
     vim.api.nvim_set_current_win(reqwin)
+  end
+end
+
+-- When a .req.resp file is opened, open its corresponding .req file (if any)
+-- in a split to the left, leaving focus on the response buffer.
+function M.open_existing_request(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local resppath = vim.api.nvim_buf_get_name(buf)
+  if resppath == "" or not resppath:match("%.req%.resp$") then
+    return
+  end
+  local reqpath = request_path_for(resppath)
+  if vim.fn.filereadable(reqpath) == 0 then
+    return
+  end
+  local respwin = vim.fn.bufwinid(buf)
+  open_request_file(reqpath)
+  -- Keep focus on the response buffer.
+  if respwin ~= -1 then
+    vim.api.nvim_set_current_win(respwin)
   end
 end
 

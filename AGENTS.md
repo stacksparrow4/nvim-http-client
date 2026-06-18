@@ -15,9 +15,10 @@ by a `---` delimited YAML-style header block describing the connection target.
 ```
 plugin/nvim-http-client.lua Entry point: registers the :SendRequest command,
                             the `req` filetype (*.req, *.resp), a
-                            BufWritePost autocmd to re-apply syntax, and a
-                            BufReadPost autocmd to auto-open an existing
-                            *.resp alongside a *.req file.
+                            BufWritePost autocmd to re-apply syntax, and
+                            BufReadPost autocmds to auto-open an existing
+                            *.resp to the right of a *.req file (and, when a
+                            *.req.resp is opened, the *.req to the left).
 lua/nvim-http-client/init.lua
                             Core module: M.setup/config, syntax highlighting
                             (apply_syntax), request dispatch (send_request),

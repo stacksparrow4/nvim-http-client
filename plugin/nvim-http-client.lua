@@ -55,3 +55,15 @@ vim.api.nvim_create_autocmd("BufReadPost", {
     require("nvim-http-client").open_existing_response(args.buf)
   end,
 })
+
+-- When a *.req.resp file is opened, automatically open its corresponding
+-- *.req file in a split to the left if it already exists, mirroring the way a
+-- *.req file opens its response to the right.
+vim.api.nvim_create_autocmd("BufReadPost", {
+  group = group,
+  pattern = { "*.req.resp" },
+  nested = true,
+  callback = function(args)
+    require("nvim-http-client").open_existing_request(args.buf)
+  end,
+})
