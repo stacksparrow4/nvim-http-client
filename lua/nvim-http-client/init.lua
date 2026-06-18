@@ -135,6 +135,18 @@ end
 -- Response buffer handling
 -- ---------------------------------------------------------------------------
 
+-- Find a window in the current tab showing exactly `path`, or -1. (Unlike
+-- vim.fn.bufnr, which matches buffer names as a substring/pattern and would
+-- e.g. match "foo.req.resp" when looking for "foo.req".)
+local function win_showing(path)
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)) == path then
+      return win
+    end
+  end
+  return -1
+end
+
 -- Find an existing window in the current tab that is already showing a
 -- response (*.resp) file, so we can reuse it instead of opening a new split.
 local function existing_response_win()
@@ -152,8 +164,7 @@ end
 -- already showing a response file, falling back to a new split.
 local function open_response_file(path)
   local escaped = vim.fn.fnameescape(path)
-  local bufnr = vim.fn.bufnr(path)
-  local win = (bufnr ~= -1) and vim.fn.bufwinid(bufnr) or -1
+  local win = win_showing(path)
 
   if win == -1 then
     win = existing_response_win()
@@ -208,8 +219,7 @@ end
 -- a new split.
 local function open_request_file(path)
   local escaped = vim.fn.fnameescape(path)
-  local bufnr = vim.fn.bufnr(path)
-  local win = (bufnr ~= -1) and vim.fn.bufwinid(bufnr) or -1
+  local win = win_showing(path)
 
   if win == -1 then
     win = existing_request_win()
@@ -229,6 +239,22 @@ end
 
 -- When a .req file is opened, open its corresponding .resp file (if any) in a
 -- split, leaving focus on the request buffer.
+-- Re-entrancy guard: opening the counterpart file fires nested BufReadPost
+-- autocmds (request <-> response), which would otherwise ping-pong forever.
+local auto_opening = false
+
+local function with_auto_open_guard(fn)
+  if auto_opening then
+    return
+  end
+  auto_opening = true
+  local ok, err = pcall(fn)
+  auto_opening = false
+  if not ok then
+    error(err)
+  end
+end
+
 function M.open_existing_response(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local reqpath = vim.api.nvim_buf_get_name(buf)
@@ -239,12 +265,14 @@ function M.open_existing_response(buf)
   if vim.fn.filereadable(resppath) == 0 then
     return
   end
-  local reqwin = vim.fn.bufwinid(buf)
-  open_response_file(resppath)
-  -- Keep focus on the request buffer.
-  if reqwin ~= -1 then
-    vim.api.nvim_set_current_win(reqwin)
-  end
+  with_auto_open_guard(function()
+    local reqwin = vim.fn.bufwinid(buf)
+    open_response_file(resppath)
+    -- Keep focus on the request buffer.
+    if reqwin ~= -1 then
+      vim.api.nvim_set_current_win(reqwin)
+    end
+  end)
 end
 
 -- When a .req.resp file is opened, open its corresponding .req file (if any)
@@ -259,12 +287,14 @@ function M.open_existing_request(buf)
   if vim.fn.filereadable(reqpath) == 0 then
     return
   end
-  local respwin = vim.fn.bufwinid(buf)
-  open_request_file(reqpath)
-  -- Keep focus on the response buffer.
-  if respwin ~= -1 then
-    vim.api.nvim_set_current_win(respwin)
-  end
+  with_auto_open_guard(function()
+    local respwin = vim.fn.bufwinid(buf)
+    open_request_file(reqpath)
+    -- Keep focus on the response buffer.
+    if respwin ~= -1 then
+      vim.api.nvim_set_current_win(respwin)
+    end
+  end)
 end
 
 -- Parse the buffer of a .req document and build the request URL in the form
