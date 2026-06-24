@@ -13,7 +13,8 @@ by a `---` delimited YAML-style header block describing the connection target.
 ## Repository layout
 
 ```
-plugin/nvim-http-client.lua Entry point: registers the :SendRequest command,
+plugin/nvim-http-client.lua Entry point: registers the :SendRequest and
+                            :SendRequestMany commands,
                             the `req` filetype (*.req, *.resp), a
                             BufWritePost autocmd to re-apply syntax, and
                             BufReadPost autocmds to auto-open an existing
@@ -21,8 +22,8 @@ plugin/nvim-http-client.lua Entry point: registers the :SendRequest command,
                             *.req.resp is opened, the *.req to the left).
 lua/nvim-http-client/init.lua
                             Core module: M.setup/config, syntax highlighting
-                            (apply_syntax), request dispatch (send_request),
-                            and response buffer handling.
+                            (apply_syntax), request dispatch (send_request,
+                            send_request_many), and response buffer handling.
 lua/nvim-http-client/convert.lua
                             :Convert feature: encode/decode of a captured
                             selection region in two stacked scratch panes
@@ -47,6 +48,15 @@ syntax/req.vim              Syntax loader; defers to require("nvim-http-client")
 The response file is prefixed with its own `---` delimited frontmatter block
 carrying a single `time` key: the elapsed request time in milliseconds (the
 wall-clock time to send the request and fully receive/decode the body).
+
+`:SendRequestMany N` sends the request `N` times sequentially (aborting
+immediately if any request fails) and writes the aggregated responses to
+`<name>.req.resp.many` (opened in the response pane like a `.resp` file).
+The file starts with a `---` frontmatter section carrying `avg-time`
+(rounded integer ms), `total-time` (sum of the individual `time` values) and
+`number` (the request count). Each response then follows as its own section,
+separated by `-----` (five dashes). `.many` files are not syntax-highlighted
+and have no auto-open pairing with their `.req`.
 
 ## req document format
 

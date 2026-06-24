@@ -9,6 +9,13 @@ end, {
   desc = "Send the current buffer as an HTTP request and show the response",
 })
 
+vim.api.nvim_create_user_command("SendRequestMany", function(opts)
+  require("nvim-http-client").send_request_many(opts.args)
+end, {
+  nargs = 1,
+  desc = "Send the current buffer as an HTTP request N times and show the aggregated responses",
+})
+
 vim.api.nvim_create_user_command("CopyURL", function()
   require("nvim-http-client").copy_url()
 end, {

@@ -148,11 +148,12 @@ local function win_showing(path)
 end
 
 -- Find an existing window in the current tab that is already showing a
--- response (*.resp) file, so we can reuse it instead of opening a new split.
+-- response (*.resp or *.resp.many) file, so we can reuse it instead of
+-- opening a new split.
 local function existing_response_win()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
-    if name:match("%.resp$") then
+    if name:match("%.resp$") or name:match("%.resp%.many$") then
       return win
     end
   end
@@ -193,6 +194,12 @@ local function response_path_for(reqpath)
   local dir = vim.fn.fnamemodify(reqpath, ":h")
   local name = vim.fn.fnamemodify(reqpath, ":t")
   return dir .. "/" .. name .. ".resp"
+end
+
+-- Build the aggregate response file path for SendRequestMany:
+-- <dir>/<name>.req -> <dir>/<name>.req.resp.many
+local function many_response_path_for(reqpath)
+  return response_path_for(reqpath) .. ".many"
 end
 
 -- Build the request file path for a given response path:
@@ -372,17 +379,21 @@ function M.copy_url()
   vim.notify("CopyURL: " .. url)
 end
 
-function M.send_request()
+-- Validate the current buffer as a saved .req document and gather everything
+-- needed to dispatch it: the request file path, its byte content, and the
+-- helper command. Returns (reqpath, content, cmd) or nil after notifying the
+-- user of the failure. `cmdname` labels error messages.
+local function prepare_request(cmdname)
   local reqpath = vim.api.nvim_buf_get_name(0)
   if reqpath == "" then
-    vim.notify("SendRequest: save the request to a file first", vim.log.levels.ERROR)
-    return
+    vim.notify(cmdname .. ": save the request to a file first", vim.log.levels.ERROR)
+    return nil
   end
 
   -- Sanity check: only operate on .req files.
   if not reqpath:match("%.req$") then
-    vim.notify("SendRequest: not a .req file: " .. reqpath, vim.log.levels.ERROR)
-    return
+    vim.notify(cmdname .. ": not a .req file: " .. reqpath, vim.log.levels.ERROR)
+    return nil
   end
 
   -- Send the request exactly as it exists on disk so the body (notably
@@ -393,56 +404,127 @@ function M.send_request()
       vim.cmd("silent keepjumps write")
     end)
     if not saved then
-      vim.notify("SendRequest: failed to save buffer before sending", vim.log.levels.ERROR)
-      return
+      vim.notify(cmdname .. ": failed to save buffer before sending", vim.log.levels.ERROR)
+      return nil
     end
   end
 
   local rf = io.open(reqpath, "rb")
   if not rf then
-    vim.notify("SendRequest: cannot read " .. reqpath, vim.log.levels.ERROR)
-    return
+    vim.notify(cmdname .. ": cannot read " .. reqpath, vim.log.levels.ERROR)
+    return nil
   end
   local content = rf:read("*a")
   rf:close()
 
   local helper = python_helper()
   if vim.fn.filereadable(helper) == 0 then
-    vim.notify("SendRequest: python helper not found at " .. helper, vim.log.levels.ERROR)
-    return
+    vim.notify(cmdname .. ": python helper not found at " .. helper, vim.log.levels.ERROR)
+    return nil
   end
 
   local cmd = vim.deepcopy(M.config.runner)
   table.insert(cmd, helper)
+  return reqpath, content, cmd
+end
+
+-- Run the helper once for `content`. Returns the normalized response text on
+-- success, or nil plus the helper's error output. Only CRs in the header
+-- block (HTTP headers are always CRLF) are normalized so the headers display
+-- cleanly; the body is preserved verbatim.
+local function run_helper(cmd, content)
   local result = vim.fn.system(cmd, content)
-
   if vim.v.shell_error ~= 0 then
-    vim.notify("SendRequest failed:\n" .. result, vim.log.levels.ERROR)
-    return
+    return nil, result
   end
-
-  -- Preserve the response body verbatim. Only normalize CR within the header
-  -- block (HTTP headers are always CRLF) so the headers display cleanly; the
-  -- body is written exactly as received.
-  local resppath = response_path_for(reqpath)
-  local out
   local sep = result:find("\r\n\r\n", 1, true)
   if sep then
     local head = result:sub(1, sep - 1):gsub("\r", "")
-    out = head .. "\n\n" .. result:sub(sep + 4)
-  else
-    out = result:gsub("\r", "")
+    return head .. "\n\n" .. result:sub(sep + 4)
   end
+  return (result:gsub("\r", ""))
+end
 
-  local wf, werr = io.open(resppath, "wb")
+-- Write `text` to `path` (binary). Returns true on success, false after
+-- notifying the user.
+local function write_file(cmdname, path, text)
+  local wf, werr = io.open(path, "wb")
   if not wf then
-    vim.notify("SendRequest: failed to write " .. resppath .. ": " .. tostring(werr), vim.log.levels.ERROR)
+    vim.notify(cmdname .. ": failed to write " .. path .. ": " .. tostring(werr), vim.log.levels.ERROR)
+    return false
+  end
+  wf:write(text)
+  wf:close()
+  return true
+end
+
+function M.send_request()
+  local reqpath, content, cmd = prepare_request("SendRequest")
+  if not reqpath then
     return
   end
-  wf:write(out)
-  wf:close()
+
+  local out, err = run_helper(cmd, content)
+  if not out then
+    vim.notify("SendRequest failed:\n" .. err, vim.log.levels.ERROR)
+    return
+  end
+
+  local resppath = response_path_for(reqpath)
+  if not write_file("SendRequest", resppath, out) then
+    return
+  end
 
   open_response_file(resppath)
+end
+
+function M.send_request_many(arg)
+  local count = tonumber(arg)
+  if not count or count < 1 or count ~= math.floor(count) then
+    vim.notify("SendRequestMany: argument must be a positive integer", vim.log.levels.ERROR)
+    return
+  end
+
+  local reqpath, content, cmd = prepare_request("SendRequestMany")
+  if not reqpath then
+    return
+  end
+
+  local sections = {}
+  local total = 0
+  for i = 1, count do
+    local out, err = run_helper(cmd, content)
+    if not out then
+      vim.notify(
+        string.format("SendRequestMany failed on request %d/%d:\n%s", i, count, err),
+        vim.log.levels.ERROR
+      )
+      return
+    end
+    -- The per-response frontmatter carries the elapsed time in milliseconds.
+    local t = tonumber(out:match("^%-%-%-\ntime:%s*(%d+)")) or 0
+    total = total + t
+    if out:sub(-1) ~= "\n" then
+      out = out .. "\n"
+    end
+    table.insert(sections, out)
+  end
+
+  local avg = math.floor(total / count + 0.5)
+  local parts = {
+    string.format("---\navg-time: %d\ntotal-time: %d\nnumber: %d\n---\n", avg, total, count),
+  }
+  for _, section in ipairs(sections) do
+    table.insert(parts, "-----\n")
+    table.insert(parts, section)
+  end
+
+  local manypath = many_response_path_for(reqpath)
+  if not write_file("SendRequestMany", manypath, table.concat(parts)) then
+    return
+  end
+
+  open_response_file(manypath)
 end
 
 return M
