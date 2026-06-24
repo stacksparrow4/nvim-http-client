@@ -29,8 +29,9 @@ lua/nvim-http-client/convert.lua
                             selection region in two stacked scratch panes
                             (workflow pipelines + decoded output).
 python/send_request.py      stdin->stdout HTTP client. Parses the `---` header,
-                            opens a (optionally TLS) socket, sends the request,
-                            reads the response. Stdlib only (socket, ssl, sys).
+                            sends the request via `httpx` (HTTP/1.1 and
+                            HTTP/2), and writes the raw, fully-decoded
+                            response. Self-contained uv script.
 syntax/req.vim              Syntax loader; defers to require("nvim-http-client").apply_syntax().
 ```
 
@@ -68,13 +69,18 @@ protocol: https
 sni: example.com
 format_json: false
 ---
-GET / HTTP/1.1
+GET / HTTP/2
 Host: example.com
 
 ```
 
 The header block is optional; if omitted, host/port are inferred from the
 `Host:` request header and the protocol (default `https`).
+
+The HTTP version is taken from the request line: `HTTP/2` forces HTTP/2 and
+`HTTP/1.1` (or `HTTP/1.0`) forces HTTP/1.1. If the request line omits the
+version, HTTP/2 is negotiated over TLS via ALPN with a fallback to HTTP/1.1.
+The response status line reports the version actually used.
 
 The `format_json` key (default `false`) pretty-prints the response body as
 JSON before writing the response file; if the body is not valid JSON the
@@ -115,9 +121,12 @@ are intercepted with `BufWriteCmd`.
 There is no automated test suite. Verify changes manually:
 
 ```bash
-# Exercise the Python helper directly (no Neovim needed):
-printf '---\nhost: example.com\nprotocol: https\n---\nGET / HTTP/1.1\nHost: example.com\n' \
-  | python3 python/send_request.py
+# Exercise the Python helper directly (no Neovim needed). It is a
+# self-contained uv script, so run it via uv (or the executable shebang) so
+# its dependencies (httpx, etc.) are installed automatically:
+printf '%s\n' '---' 'host: example.com' 'protocol: https' '---' \
+  'GET / HTTP/1.1' 'Host: example.com' '' \
+  | uv run python/send_request.py
 ```
 
 Syntax-check the Python helper before committing:

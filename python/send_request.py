@@ -2,8 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "requests",
-#     "requests[socks]",
+#     "httpx[http2,socks]",
 #     "brotli",
 #     "zstandard",
 # ]
@@ -20,16 +19,22 @@ Reads a "req" document on stdin of the form:
     proxy: http://localhost:8080   # or socks5://localhost:1080
     format_json: false
     ---
-    GET / HTTP/1.1
+    GET / HTTP/2
     Host: example.com
     ...
 
 The leading `---` delimited header is optional. The remainder of the
-document is treated as a raw HTTP request which is sent with `requests`.
+document is treated as a raw HTTP request which is sent with `httpx`.
 The raw HTTP response is written to stdout, with the body fully decoded
-(content/transfer encodings such as gzip, deflate, br and zstd are
-transparently decompressed by urllib3, given the dependencies declared in
-the inline script metadata above).
+(content encodings such as gzip, deflate, br and zstd are transparently
+decompressed by httpx, given the dependencies declared in the inline
+script metadata above).
+
+The HTTP version is taken from the request line: `HTTP/2` forces HTTP/2
+and `HTTP/1.1` (or `HTTP/1.0`) forces HTTP/1.1. If the request line omits
+the version, HTTP/2 is negotiated over TLS via ALPN with a fallback to
+HTTP/1.1. The response status line reports the protocol version that was
+actually used (`HTTP/1.1`, `HTTP/2`, ...).
 
 The response is prefixed with its own `---` delimited frontmatter block
 carrying a single `time` key: the elapsed request time in milliseconds.
@@ -42,17 +47,19 @@ import json
 import sys
 import time
 
-import requests
-import urllib3
-
-# Permissive TLS (self-signed / mismatched certs) means urllib3 would
-# otherwise emit InsecureRequestWarning noise on stderr.
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import httpx
 
 TIMEOUT = 15
 
 # Keys recognized inside the `---` delimited header block.
-VALID_HEADER_KEYS = ("host", "port", "protocol", "sni", "proxy", "format_json")
+VALID_HEADER_KEYS = (
+    "host",
+    "port",
+    "protocol",
+    "sni",
+    "proxy",
+    "format_json",
+)
 
 # Response headers that no longer describe the decoded body we emit.
 _DROPPED_RESPONSE_HEADERS = (
@@ -115,10 +122,12 @@ def parse_input(data):
 
 
 def parse_http_request(request):
-    """Parse a raw HTTP request into (method, target, headers, body).
+    """Parse a raw HTTP request into (method, target, version, headers, body).
 
     `headers` is a list of (name, value) pairs preserving order. `target` is
-    the request-target from the request line (path + query).
+    the request-target from the request line (path + query). `version` is the
+    HTTP version token from the request line (e.g. "HTTP/2"), or None if the
+    request line omits it.
 
     The body is returned with its original line endings untouched. This
     matters for multipart/form-data, whose boundary delimiters must be CRLF
@@ -146,6 +155,7 @@ def parse_http_request(request):
         raise ValueError("missing request line")
     method = parts[0].upper()
     target = parts[1] if len(parts) > 1 else "/"
+    version = parts[2] if len(parts) > 2 else None
 
     headers = []
     for line in head_lines[1:]:
@@ -156,7 +166,7 @@ def parse_http_request(request):
         key, value = line.split(":", 1)
         headers.append((key.strip(), value.strip()))
 
-    return method, target, headers, body
+    return method, target, version, headers, body
 
 
 def get_header(headers, name):
@@ -169,7 +179,7 @@ def get_header(headers, name):
 
 
 def resolve_target(header, request_headers):
-    """Compute (host, port, protocol, sni, proxies) from header + defaults."""
+    """Compute (host, port, protocol, sni, proxy) from header + defaults."""
     protocol = header.get("protocol", "https").lower()
     if protocol not in ("http", "https"):
         raise ValueError("protocol must be 'http' or 'https', got %r" % protocol)
@@ -196,8 +206,28 @@ def resolve_target(header, request_headers):
         port = 443 if protocol == "https" else 80
 
     sni = header.get("sni", host) if protocol == "https" else None
-    proxies = parse_proxy(header.get("proxy"))
-    return host, port, protocol, sni, proxies
+    proxy = parse_proxy(header.get("proxy"))
+    return host, port, protocol, sni, proxy
+
+
+def parse_http_version(version):
+    """Map a request-line HTTP version token to (enable_http2, force_http2).
+
+    ``HTTP/2`` (or ``HTTP/2.0``) forces HTTP/2, ``HTTP/1.1``/``HTTP/1.0``
+    force HTTP/1.1, and a missing version negotiates HTTP/2 via ALPN with a
+    fallback to HTTP/1.1.
+    """
+    if version is None:
+        return True, False
+    raw = version.strip().lower()
+    if raw in ("http/1.1", "http/1.0"):
+        return False, False
+    if raw in ("http/2", "http/2.0"):
+        return True, True
+    raise ValueError(
+        "unsupported HTTP version in request line: %r "
+        "(expected HTTP/1.0, HTTP/1.1 or HTTP/2)" % version
+    )
 
 
 def parse_bool(value):
@@ -222,7 +252,7 @@ _PROXY_SCHEMES = {
 
 
 def parse_proxy(value):
-    """Parse a proxy URL into a `requests` proxies dict, or None.
+    """Parse a proxy URL into an httpx proxy URL string, or None.
 
     Accepts forms like ``http://localhost:8080``, ``socks5://localhost:1080``
     or ``localhost:8080`` (defaulting to the ``http`` scheme). For SOCKS5,
@@ -256,73 +286,62 @@ def parse_proxy(value):
         raise ValueError("proxy must include a host")
     if not 0 < proxy_port < 65536:
         raise ValueError("proxy port must be between 1 and 65535, got %d" % proxy_port)
-    proxy_url = "%s://%s:%d" % (scheme, proxy_host, proxy_port)
-    return {"http": proxy_url, "https": proxy_url}
-
-
-class _SNIAdapter(requests.adapters.HTTPAdapter):
-    """HTTPAdapter that pins the TLS SNI to an explicit server hostname.
-
-    This lets the connection target (URL host) differ from the name sent in
-    the TLS ClientHello, mirroring the original `sni` header support.
-    """
-
-    def __init__(self, server_hostname, *args, **kwargs):
-        self._server_hostname = server_hostname
-        super().__init__(*args, **kwargs)
-
-    def init_poolmanager(self, *args, **kwargs):
-        kwargs["server_hostname"] = self._server_hostname
-        super().init_poolmanager(*args, **kwargs)
-
-
-def build_session(host, protocol, sni):
-    """Create a session, mounting an SNI-overriding adapter when needed."""
-    session = requests.Session()
-    # Don't let environment proxies / netrc surprise the user; we pass proxies
-    # explicitly per request.
-    session.trust_env = False
-    if protocol == "https" and sni and sni != host:
-        session.mount("https://", _SNIAdapter(sni))
-    return session
+    return "%s://%s:%d" % (scheme, proxy_host, proxy_port)
 
 
 def send(header, request):
-    """Send the parsed request via `requests`.
+    """Send the parsed request via `httpx`.
 
     Returns (Response, elapsed_ms) where elapsed_ms is the wall-clock time
     taken to send the request and fully receive/decode the response body.
     """
-    method, target, req_headers, body = parse_http_request(request)
-    host, port, protocol, sni, proxies = resolve_target(header, req_headers)
+    method, target, version, req_headers, body = parse_http_request(request)
+    host, port, protocol, sni, proxy = resolve_target(header, req_headers)
+    enable_http2, force_http2 = parse_http_version(version)
 
     url = "%s://%s:%d%s" % (protocol, host, port, target)
 
-    # `requests` manages these itself; passing them through causes conflicts.
-    headers = {
-        k: v
-        for (k, v) in req_headers
-        if k.lower() not in ("content-length",)
-    }
+    # `httpx` manages Content-Length itself; passing it through causes
+    # conflicts. Other headers are forwarded verbatim, preserving order.
+    headers = [(k, v) for (k, v) in req_headers if k.lower() != "content-length"]
 
     data = body.encode("utf-8") if body.strip() else None
 
-    session = build_session(host, protocol, sni)
-    start = time.perf_counter()
-    resp = session.request(
-        method,
-        url,
-        headers=headers,
-        data=data,
-        proxies=proxies,
+    # Override the TLS SNI when it differs from the connection host. httpx
+    # forwards the `sni_hostname` request extension down to httpcore's TLS
+    # handshake, mirroring the original `sni` header support.
+    extensions = {}
+    if protocol == "https" and sni and sni != host:
+        extensions["sni_hostname"] = sni
+
+    client = httpx.Client(
+        http2=enable_http2,
         verify=False,
-        allow_redirects=False,
+        # Don't let environment proxies / netrc surprise the user; we pass
+        # the proxy explicitly.
+        trust_env=False,
+        proxy=proxy,
+        follow_redirects=False,
         timeout=TIMEOUT,
     )
-    # Force the body to be fully received/decoded so the timing covers the
-    # whole response, not just the headers.
-    resp.content
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    try:
+        start = time.perf_counter()
+        req = client.build_request(
+            method, url, headers=headers, content=data, extensions=extensions
+        )
+        resp = client.send(req)
+        # Force the body to be fully received/decoded so the timing covers
+        # the whole response, not just the headers.
+        resp.read()
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+    finally:
+        client.close()
+
+    if force_http2 and resp.http_version != "HTTP/2":
+        raise ValueError(
+            "requested HTTP/2 but the server negotiated %s" % resp.http_version
+        )
+
     return resp, elapsed_ms
 
 
@@ -336,18 +355,19 @@ def format_response(resp, elapsed_ms, format_json=False):
     leaving it untouched if it does not parse cleanly.
     """
     frontmatter = "---\r\ntime: %d\r\n---\r\n" % round(elapsed_ms)
-    version = {10: "1.0", 11: "1.1"}.get(getattr(resp.raw, "version", 11), "1.1")
-    reason = resp.reason or ""
-    status_line = "HTTP/%s %d %s" % (version, resp.status_code, reason)
+    # `resp.http_version` already includes the "HTTP/" prefix and reports the
+    # protocol version actually negotiated (e.g. "HTTP/1.1" or "HTTP/2").
+    reason = resp.reason_phrase or ""
+    status_line = "%s %d %s" % (resp.http_version, resp.status_code, reason)
 
     out_lines = [status_line.rstrip()]
-    # Use the raw urllib3 header dict so duplicate headers (e.g. Set-Cookie)
-    # are preserved rather than comma-folded.
-    raw_headers = getattr(resp.raw, "headers", None) or resp.headers
-    for key, value in raw_headers.items():
-        if key.lower() in _DROPPED_RESPONSE_HEADERS:
+    # Use the raw header list so duplicate headers (e.g. Set-Cookie) are
+    # preserved rather than comma-folded, and original casing is kept.
+    for raw_key, raw_value in resp.headers.raw:
+        name = raw_key.decode("iso-8859-1")
+        if name.lower() in _DROPPED_RESPONSE_HEADERS:
             continue
-        out_lines.append("%s: %s" % (key, value))
+        out_lines.append("%s: %s" % (name, raw_value.decode("iso-8859-1")))
 
     # `resp.content` is the decoded body; advertise its real length.
     body = resp.content
@@ -381,7 +401,7 @@ def main():
     except ValueError as exc:
         sys.stderr.write("%s\n" % exc)
         return 1
-    except requests.exceptions.RequestException as exc:
+    except httpx.HTTPError as exc:
         sys.stderr.write("connection error: %s\n" % exc)
         return 1
 
