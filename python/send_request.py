@@ -31,12 +31,16 @@ The raw HTTP response is written to stdout, with the body fully decoded
 transparently decompressed by urllib3, given the dependencies declared in
 the inline script metadata above).
 
+The response is prefixed with its own `---` delimited frontmatter block
+carrying a single `time` key: the elapsed request time in milliseconds.
+
 This file is a self-contained uv script: the dependencies in the `/// script`
 block are installed automatically when run via `uv run`.
 """
 
 import json
 import sys
+import time
 
 import requests
 import urllib3
@@ -284,7 +288,11 @@ def build_session(host, protocol, sni):
 
 
 def send(header, request):
-    """Send the parsed request via `requests` and return the Response."""
+    """Send the parsed request via `requests`.
+
+    Returns (Response, elapsed_ms) where elapsed_ms is the wall-clock time
+    taken to send the request and fully receive/decode the response body.
+    """
     method, target, req_headers, body = parse_http_request(request)
     host, port, protocol, sni, proxies = resolve_target(header, req_headers)
 
@@ -300,7 +308,8 @@ def send(header, request):
     data = body.encode("utf-8") if body.strip() else None
 
     session = build_session(host, protocol, sni)
-    return session.request(
+    start = time.perf_counter()
+    resp = session.request(
         method,
         url,
         headers=headers,
@@ -310,14 +319,23 @@ def send(header, request):
         allow_redirects=False,
         timeout=TIMEOUT,
     )
+    # Force the body to be fully received/decoded so the timing covers the
+    # whole response, not just the headers.
+    resp.content
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return resp, elapsed_ms
 
 
-def format_response(resp, format_json=False):
+def format_response(resp, elapsed_ms, format_json=False):
     """Reconstruct a raw HTTP response with a fully-decoded body.
+
+    The output is prefixed with a `---` delimited frontmatter block carrying
+    a single `time` key (elapsed request time in milliseconds).
 
     When `format_json` is true, attempt to pretty-print the body as JSON,
     leaving it untouched if it does not parse cleanly.
     """
+    frontmatter = "---\r\ntime: %d\r\n---\r\n" % round(elapsed_ms)
     version = {10: "1.0", 11: "1.1"}.get(getattr(resp.raw, "version", 11), "1.1")
     reason = resp.reason or ""
     status_line = "HTTP/%s %d %s" % (version, resp.status_code, reason)
@@ -342,7 +360,7 @@ def format_response(resp, format_json=False):
             pass
     out_lines.append("Content-Length: %d" % len(body))
 
-    blob = ("\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
+    blob = (frontmatter + "\r\n".join(out_lines) + "\r\n\r\n").encode("iso-8859-1")
     return blob + body
 
 
@@ -359,7 +377,7 @@ def main():
         return 1
 
     try:
-        resp = send(header, request)
+        resp, elapsed_ms = send(header, request)
     except ValueError as exc:
         sys.stderr.write("%s\n" % exc)
         return 1
@@ -373,7 +391,9 @@ def main():
         sys.stderr.write("format_json: %s\n" % exc)
         return 1
 
-    sys.stdout.buffer.write(format_response(resp, format_json=format_json))
+    sys.stdout.buffer.write(
+        format_response(resp, elapsed_ms, format_json=format_json)
+    )
     sys.stdout.flush()
     return 0
 

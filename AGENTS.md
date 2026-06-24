@@ -44,6 +44,10 @@ syntax/req.vim              Syntax loader; defers to require("nvim-http-client")
 4. Lua strips CRs, writes the response next to the request as `<name>.resp`,
    and opens it in a split (`vsplit` / `split` / `tab`, per `config.open`).
 
+The response file is prefixed with its own `---` delimited frontmatter block
+carrying a single `time` key: the elapsed request time in milliseconds (the
+wall-clock time to send the request and fully receive/decode the body).
+
 ## req document format
 
 ```
