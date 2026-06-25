@@ -458,6 +458,44 @@ local function write_file(cmdname, path, text)
   return true
 end
 
+-- Compute the next available backup request path for `reqpath`. Backups live
+-- in a `.backup` directory beside the request file and are numbered to avoid
+-- collisions: <name>.<N>.req where N is the smallest positive integer not
+-- already used by an existing backup request file. The same number is reused
+-- for the corresponding response backup (which is simply overwritten if it
+-- already exists). Creates the `.backup` directory if missing. Returns the
+-- backup request path or nil plus an error message.
+local function next_backup_req_path(reqpath)
+  local dir = vim.fn.fnamemodify(reqpath, ":h")
+  local name = vim.fn.fnamemodify(reqpath, ":t") -- e.g. 000001.req
+  local base = name:gsub("%.req$", "") -- e.g. 000001
+  local backupdir = dir .. "/.backup"
+  if vim.fn.isdirectory(backupdir) == 0 then
+    if vim.fn.mkdir(backupdir, "p") == 0 then
+      return nil, "failed to create " .. backupdir
+    end
+  end
+  local n = 1
+  while vim.fn.filereadable(backupdir .. "/" .. base .. "." .. n .. ".req") == 1 do
+    n = n + 1
+  end
+  return backupdir .. "/" .. base .. "." .. n .. ".req"
+end
+
+-- Back up a sent request and its response. `resp_suffix` is appended to the
+-- numbered backup request path to form the response backup path (".resp" for
+-- SendRequest, ".resp.many" for SendRequestMany). Failures are reported but
+-- do not abort the caller (the primary response file is already written).
+local function write_backup(cmdname, reqpath, content, resp_text, resp_suffix)
+  local backup_req, err = next_backup_req_path(reqpath)
+  if not backup_req then
+    vim.notify(cmdname .. ": backup failed: " .. err, vim.log.levels.ERROR)
+    return
+  end
+  write_file(cmdname, backup_req, content)
+  write_file(cmdname, backup_req .. resp_suffix, resp_text)
+end
+
 function M.send_request()
   local reqpath, content, cmd = prepare_request("SendRequest")
   if not reqpath then
@@ -474,6 +512,8 @@ function M.send_request()
   if not write_file("SendRequest", resppath, out) then
     return
   end
+
+  write_backup("SendRequest", reqpath, content, out, ".resp")
 
   open_response_file(resppath)
 end
@@ -519,10 +559,13 @@ function M.send_request_many(arg)
     table.insert(parts, section)
   end
 
+  local many_text = table.concat(parts)
   local manypath = many_response_path_for(reqpath)
-  if not write_file("SendRequestMany", manypath, table.concat(parts)) then
+  if not write_file("SendRequestMany", manypath, many_text) then
     return
   end
+
+  write_backup("SendRequestMany", reqpath, content, many_text, ".resp.many")
 
   open_response_file(manypath)
 end

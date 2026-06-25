@@ -46,6 +46,19 @@ syntax/req.vim              Syntax loader; defers to require("nvim-http-client")
 4. Lua strips CRs, writes the response next to the request as `<name>.resp`,
    and opens it in a split (`vsplit` / `split` / `tab`, per `config.open`).
 
+## Backups
+
+Every successful `:SendRequest` / `:SendRequestMany` also writes a numbered
+backup of the sent request and its response into a `.backup` directory beside
+the request file (created on demand). For a request `000001.req` the backups
+are `.backup/000001.N.req` plus `.backup/000001.N.req.resp` (or
+`.backup/000001.N.req.resp.many` for `:SendRequestMany`). `N` is the smallest
+positive integer not already used by an existing backup request file; the same
+`N` is reused for the response backup, which is overwritten if it already
+exists. The counter is shared between `:SendRequest` and `:SendRequestMany`
+(it only ever scans for the next free `.req` backup). No backup is written if
+the request fails.
+
 The response file is prefixed with its own `---` delimited frontmatter block
 carrying a single `time` key: the elapsed request time in milliseconds (the
 wall-clock time to send the request and fully receive/decode the body).
